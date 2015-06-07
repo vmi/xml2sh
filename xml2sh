@@ -1,0 +1,139 @@
+#!/bin/sh
+#
+# The MIT License (MIT)
+# 
+# Copyright (c) 2015 Motonori IWAMURO
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+xml2sh_help() {
+  echo "XML to shell script converter.
+
+Usage: xml2sh [-p PREFIX] [FILE]
+
+Default PREFIX is \"xml2sh_\".
+"
+  exit 1
+}
+
+# Usage: xml2sh_unset PREFIX
+xml2sh_unset() {
+  local prefix="$1"
+  unset $(set | grep "^$prefix[A-Za-z0-9_]+=" | sed 's/=.*//')
+}
+
+xml2sh() {
+  local prefix="xml2sh_"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+	xml2sh_help
+	;;
+      -p)
+	prefix="$2"
+	shift
+	shift
+	;;
+    esac
+  done
+  xml2sh_unset "$prefix"
+  sed -E '
+1 { # first line only
+  # remove BOM.
+  s/^\357\273\277//
+  # remove XML decl.
+  s@<\?xml [^>]+\?>@@
+  # delete empty line.
+  /^$/d
+}
+# remove leading white spaces.
+s@^[ \t]+<@<@
+# add newline between tag and content.
+s@>([^<>]+)<@>\
+\1\
+<@g
+# add newline between tag and tag.
+s@><@>\
+<@g
+# exapend empty tag.
+s@<([^</> \t]+)[ \t]*/[ \t]*>@<\1>\
+</\1>@g
+' "$@" | awk -v prefix="$prefix" '
+BEGIN {
+  is_opened = 0
+  idx = 0;
+  in_content = 0
+  value = ""
+  last_tag = ""
+  prev_last_tag = ""
+}
+match($0, /^<\/[^ \t<>]+/) { # end tag.
+  last_tag = substr($0, RSTART + 2, RLENGTH - 2)
+  if (--idx) {
+    key = tags[1]
+    for (i = 2; i <= idx; i++)
+      key = key "_" tags[i]
+  } else {
+    key = ""
+  }
+  if (is_opened) {
+    gsub(/\047/, "\047\\\047\047", value)
+    printf "%s%s=\047%s\047\n", prefix, key, value
+    is_opened = 0
+  } else if (num = nums[idx + 1]) {
+    if (key)
+      key = key "_" prev_last_tag
+    else
+      key = prev_last_tag
+    printf "%s%s_LAST_INDEX=%d\n", prefix, key, num
+    delete nums[idx + 1]
+  }
+  delete tags[idx]
+  in_content = 0
+  value = ""
+  prev_last_tag = last_tag
+  next
+}
+match($0, /^<[^ \t<>]+/) { # start tag.
+  is_opened = 1
+  tag = substr($0, RSTART + 1, RLENGTH - 1)
+  if (tag == last_tag) {
+    num = ++nums[idx]
+    tags[idx++] = tag "_" num
+  } else {
+    tags[idx++] = tag
+  }
+  last_tag = ""
+  prev_last_tag = ""
+  next
+}
+{
+  if (in_content) {
+    value = value "\n" $0
+  } else {
+    value = $0
+    in_content = 1
+  }
+}
+'
+}
+
+if [ "${0##*/}" = "xml2sh" ]; then
+  xml2sh "$@"
+fi
