@@ -1,4 +1,5 @@
 #!/bin/sh
+# -*- coding: raw-text -*-
 #
 # The MIT License (MIT)
 # 
@@ -22,105 +23,303 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+export XML2SH_PREFIX="${XML2SH_PREFIX:-xml2sh}"
+export XML2SH_SEP_TAG="${XML2SH_SEP_TAG:-_}"
+export XML2SH_SEP_ATR="${XML2SH_SEP_ATR:-_}"
+export XML2SH_SEP_NDX="${XML2SH_SEP_NDX:-_}"
+export XML2SH_NON_WORD_CHAR="${XML2SH_NON_WORD_CHAR:-_}"
+
 xml2sh_help() {
   echo "XML to shell script converter.
 
-Usage: xml2sh [-p PREFIX] [FILE]
+Usage: xml2sh [XML_FILE]
 
-Default PREFIX is \"xml2sh_\".
+  Use standard input if no XML_FILE.
+
+Environment Variables:
+  XML2SH_PREFIX: the prefix of variables. \"$XML2SH_PREFIX\"
+  XML2SH_SEP_TAG: the separator between tags. \"$XML2SH_SEP_TAG\"
+  XML2SH_SEP_ATR: the separator between tag and attribute. \"$XML2SH_SEP_ATR\"
+  XML2SH_SEP_NDX: the separator between tag and index. \"$XML2SH_SEP_NDX\"
+  XML2SH_NON_WORD_CHAR: the replacement of non-word characters. \"$XML2SH_NON_WORD_CHAR\"
 "
   exit 1
 }
 
-# Usage: xml2sh_unset PREFIX
+# Usage: xml2sh_unset PREFIX SEP
 xml2sh_unset() {
-  local prefix="$1"
-  unset $(set | grep "^$prefix[A-Za-z0-9_]+=" | sed 's/=.*//')
+  local prefix="${1:-$XML2SH_PREFIX}"
+  local sep="${2:-$XML2SH_SEP_TAG}"
+  unset $(set | sed -n -E "/^$prefix$sep[A-Za-z0-9_]+=/ { s/=.*//; p; }")
+}
+
+# Usage: xml2sh_get NEW_PREFIX BASE_NAME n
+xml2sh_get() {
+  local new_prefix="$1"
+  local base_name="$2"
+  local atr=""
+  if [ "$3" -gt 1 ]; then
+    atr="$XML2SH_SEP_ATR$1"
+  fi
+  local n
+  for n in $(set | sed -n -E "s/^$base_name$atr($XML2SH_SEP_TAG[A-Za-z_][A-Za-z0-9_]*)=.*/\1/
+    t print_name
+    b
+    :print_name
+    p"); do
+    eval "${new_prefix}$n=\"\$$base_name$atr$n\""
+  done
+}
+
+# Usage: xml2sh_each NEW_PREFIX BASE_NAME EXPR ...
+xml2sh_each() {
+  local new_prefix="$1"; shift
+  local base_name="$1";  shift
+  eval "local last_index=\"\$${base_name}___LAST_INDEX"
+  local i
+  for i in $(seq 1 $last_index); do
+    xml2sh_get $new_prefix $base_name $i
+    if "$@"; then
+      break
+    fi
+    xml2sh_unset $new_prefix
+  done
 }
 
 xml2sh() {
-  local prefix="xml2sh_"
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      -h|--help)
-	xml2sh_help
-	;;
-      -p)
-	prefix="$2"
-	shift
-	shift
-	;;
-    esac
-  done
-  xml2sh_unset "$prefix"
-  sed -E '
-1 { # first line only
-  # remove BOM.
-  s/^\357\273\277//
-  # remove XML decl.
-  s@<\?xml [^>]+\?>@@
-  # delete empty line.
-  /^$/d
+  case "#{1:-}" in
+    -h|--help)
+      xml2sh_help
+      ;;
+  esac
+  LANG=C sed -E '
+1 {
+  s/^[^!-~]+//
+  s/^<\?xml [^>]+\?>//
+  /^?$/d
 }
-# remove leading white spaces.
-s@^[ \t]+<@<@
-# add newline between tag and content.
-s@>([^<>]+)<@>\
-\1\
-<@g
-# add newline between tag and tag.
-s@><@>\
-<@g
-# exapend empty tag.
-s@<([^</> \t]+)[ \t]*/[ \t]*>@<\1>\
-</\1>@g
-' "$@" | awk -v prefix="$prefix" '
-BEGIN {
-  is_opened = 0
-  idx = 0;
-  in_content = 0
-  value = ""
-  last_tag = ""
-  prev_last_tag = ""
+:next_cycle
+/<!--/ {
+  :comment_end
+  /-->/ {
+    s/<!--([^\-]|-[^\-])*-->//g
+    t next_cycle
+    b error
+  }
+  $! {
+    N
+    b comment_end
+  }
+  a\
+Incomplete comment.
+  b error
 }
-match($0, /^<\/[^ \t<>]+/) { # end tag.
-  last_tag = substr($0, RSTART + 2, RLENGTH - 2)
-  if (--idx) {
-    key = tags[1]
-    for (i = 2; i <= idx; i++)
-      key = key "_" tags[i]
+s///g
+s/^([	 ]|\n)+</</
+/^<\// {
+  :retry_end_tag_end
+  />/ {
+    h
+    s/>.*/>/
+    s/[	 ]|\n//g
+    p
+    g
+    s/^[^>]+>//
+    s/^[	 ]*(\n|$)//
+    /^$/d
+    b next_cycle
+  }
+  $! {
+    N
+    b retry_end_tag_end
+  }
+  a\
+Incomplete end tag.
+  b error
+}
+/^</ {
+  :retry_start_tag_end
+  />/ {
+    /^<!DOCTYPE/ {
+      s/^<[^>]*>//
+      /^$/d
+      b next_cycle
+    }
+    h
+    y/\n/ /
+    s/[	 ]*(\/?>).*/\
+\1/
+    s/[	 ]+([^<\/>=	 ]+=("[^<>"]*"|'\''[^<>'\'']*'\''|[^<>"'\''	 ]+))/\
+\1/g
+    p
+    g
+    /^[^>]+\/>/ {
+      s/^[^>]+\/>//
+      s/^[	 ]*(\n|$)//
+      /^$/d
+      b next_cycle
+    }
+    s/^[^>]+>//
+    /^$/d
+    b next_cycle
+  }
+  $! {
+    N
+    b retry_start_tag_end
+  }
+  a\
+Incomplete start/empty tag.
+  b error
+}
+s/^([^<>]+)</\1\
+</
+P
+D
+q
+:error
+a\
+\
+ERROR
+q
+' "$@" | LANG=C awk '
+function abort(msg) {
+  print prefix "_ERROR=true"
+  if (msg != "") {
+    gsub(/\047/, "\047\\\047\047", msg)
+    print prefix "_ERROR_MESSAGE=\047" msg "\047"
+  }
+  exit 1
+}
+function add_child(tag, key) {
+  if (key == "")
+    key = get_key()
+  tag = "<" tag ">"
+  if (!index(children[key], tag))
+    children[key] = children[key] tag
+}
+function remove_child(tag, key) {
+  if (key == "")
+    key = get_key()
+  tag = "<" tag ">"
+  sub(tag, "", children[key])
+}
+function push_tag(tag, key) {
+  if (ndx) {
+    if (tags[ndx - 1] == tag "s") {
+      --ndx
+      key = get_key(ndx - 1)
+      remove_child(reduction[ndx] = tags[ndx], key)
+    } else {
+      key = get_key(ndx - 1)
+    }
+    add_child(tag, key)
+    key = key sep_tag tag
   } else {
-    key = ""
+    key = tag
   }
-  if (is_opened) {
-    gsub(/\047/, "\047\\\047\047", value)
-    printf "%s%s=\047%s\047\n", prefix, key, value
-    is_opened = 0
-  } else if (num = nums[idx + 1]) {
-    if (key)
-      key = key "_" prev_last_tag
-    else
-      key = prev_last_tag
-    printf "%s%s_LAST_INDEX=%d\n", prefix, key, num
-    delete nums[idx + 1]
+  tag_indexes[key]++
+  tags[ndx++] = tag
+}
+function pop_tag() {
+  if (ndx)
+    delete children[get_key()]
+  if (reduction[ndx - 1]) {
+    tags[ndx - 1] = reduction[ndx - 1]
+    delete reduction[ndx - 1]
+  } else {
+    delete tags[--ndx]
   }
-  delete tags[idx]
+}
+function get_base_key(i) {
+  if (ndx == 0)
+    abort("no key")
+  if (i == "")
+    i = ndx - 1
+  return i ? (get_key(i - 1) sep_tag tags[i]) : prefix
+}
+function get_key(i, key) {
+  key = get_base_key(i)
+  if (tag_indexes[key] <= 1)
+    return key
+  else
+    return key sep_ndx tag_indexes[key]
+}
+function key2var(key) {
+  gsub(/[^A-Za-z0-9_]/, non_word_char, key)
+  return key
+}
+function print_entry(i, key) {
+  key = get_key()
+  if ((i = ++text_indexes[key]) > 1)
+    key = key sep_ndx i
+  gsub(/\047/, "\047\\\047\047", value)
+  print key2var(key) "=\047" value "\047"
+  value = ""
+}
+BEGIN {
+  if ((prefix = ENVIRON["XML2SH_PREFIX"]) == "")
+    prefix = "xml2sh"
+  if ((sep_tag = ENVIRON["XML2SH_SEP_TAG"]) == "")
+    sep_tag = "_"
+  if ((sep_atr = ENVIRON["XML2SH_SEP_ATR"]) == "")
+    sep_atr = "_"
+  if ((sep_ndx = ENVIRON["XML2SH_SEP_NDX"]) == "")
+    sep_ndx = "_"
+  if ((non_word_char = ENVIRON["XML2SH_NON_WORD_CHAR"]) == "")
+    non_word_char = "_"
+  ndx = 0
+  mode = 0
   in_content = 0
   value = ""
-  prev_last_tag = last_tag
+}
+match($0, /^<\/[^<>\t ]+>/) {
+  in_content = 0
+  if (mode < 2)
+    abort("Invalid end tag.")
+  else if (mode == 2) {
+    print_entry()
+    mode = 3
+  } else {
+    if (length(value) && !match(value, /^[ \t\n]*$/))
+      print_entry()
+    key = get_key()
+    split(children[key], cr, /><|[<>]/)
+    for (i = 2; i < length(cr); i++) {
+      c = cr[i]
+      ck = key sep_tag c
+      if ((ci = tag_indexes[ck]) > 1)
+        print key2var(ck) "___LAST_INDEX=" ci
+    }
+    if ((i = text_indexes[key]) > 1)
+      print key2var(key) "___LAST_INDEX=" i
+  }
+  pop_tag()
   next
 }
-match($0, /^<[^ \t<>]+/) { # start tag.
-  is_opened = 1
+match($0, /^<[^ \t<>]+/) {
   tag = substr($0, RSTART + 1, RLENGTH - 1)
-  if (tag == last_tag) {
-    num = ++nums[idx]
-    tags[idx++] = tag "_" num
+  if (length(value) && !match(value, /^[ \t\n]*$/))
+    print_entry()
+  in_content = 0
+  mode = 1
+  push_tag(tag)
+  next
+}
+mode == 1 {
+  if ($0 == ">") {
+    mode = 2
+  } else if ($0 == "/>") {
+    print_entry()
+    pop_tag()
+    mode = 3
   } else {
-    tags[idx++] = tag
+    eq = index($0, "=")
+    akey = substr($0, 1, eq - 1)
+    aval = substr($0, eq + 1)
+    gsub(/^["\047]|["\047]$/, "", aval)
+    gsub(/\047/, "\047\\\047\047", aval)
+    print key2var(get_key() sep_atr akey) "=\047" aval "\047"
   }
-  last_tag = ""
-  prev_last_tag = ""
   next
 }
 {
